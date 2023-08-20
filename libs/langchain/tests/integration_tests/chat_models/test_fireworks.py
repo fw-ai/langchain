@@ -23,9 +23,6 @@ def test_chat_fireworks() -> None:
     assert isinstance(response.content, str)
 
 
-test_chat_fireworks()
-
-
 def test_chat_fireworks_model() -> None:
     """Test ChatFireworks wrapper handles model_name."""
     chat = ChatFireworks(model_id="foo")

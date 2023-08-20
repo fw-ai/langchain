@@ -15,9 +15,12 @@ from typing import (
     Optional,
     Tuple,
     Union,
+    Set,
 )
+from ..llms.fireworks import BaseFireworks, FireworksChat
 
-from pydantic import Field, root_validator
+from pydantic import BaseModel, Field, root_validator
+from pydantic.types import StrictBool, StrictInt, StrictFloat, StrictStr
 from tenacity import (
     before_sleep_log,
     retry,
@@ -103,13 +106,24 @@ def _convert_dict_to_message(_dict: Mapping[str, Any]) -> BaseMessage:
         return ChatMessage(content=_dict["content"], role=role)
 
 
-def execute(messages, model: str, api_key: Optional[str]) -> Any:
+class ChatCompletionRequest(BaseModel, extra="forbid"):
+    model: StrictStr
+    messages: List[Dict[StrictStr, StrictStr]]
+    temperature: float = 1.0
+    top_p: float = 1.0
+    top_k: StrictInt = 128
+    n: StrictInt = 1
+    min_tokens: StrictInt = 0
+    max_tokens: StrictInt = 16
+    logprobs: Optional[StrictInt] = None
+    stop: Optional[Union[StrictStr, List[StrictStr]]] = None
+    stream: Optional[StrictBool] = False
+
+
+def execute(api_key: str, **kwargs: Any) -> Any:
     """Execute LLM query"""
     requestUrl = "https://api.fireworks.ai/inference/v1/chat/completions"
-    requestBody = {
-        "model": model,
-        "messages": messages,
-    }
+    requestBody = ChatCompletionRequest(**kwargs).dict()
     requestHeaders = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -154,12 +168,12 @@ class ChatFireworks(BaseChatModel):
             fireworks = ChatFireworks(model_name="accounts/fireworks/models/llama-v2-7b-chat")
     """
 
-    model_id: str = Field(
-        "accounts/fireworks/models/fireworks-llama-v2-7b-chat", alias="model"
-    )
+    model_id: str = Field("accounts/fireworks/models/llama-v2-7b-chat", alias="model")
     """Model name to use."""
     temperature: float = 0.7
     """What sampling temperature to use."""
+    n: int = 1
+    """Number of chat completions to generate for each prompt."""
     max_tokens: int = 512
     """The maximum number of tokens to generate in the completion.
     -1 returns as many tokens as possible given the prompt and
@@ -172,6 +186,8 @@ class ChatFireworks(BaseChatModel):
     """Batch size to use when passing multiple documents to generate."""
     request_timeout: Optional[Union[float, Tuple[float, float]]] = None
     """Timeout for requests to Fireworks completion API. Default is 600 seconds."""
+    streaming: bool = False
+    """Whether to stream the results or not."""
 
     @property
     def lc_secrets(self) -> Dict[str, str]:
@@ -199,20 +215,39 @@ class ChatFireworks(BaseChatModel):
         )
         return values
 
-    def completion_with_retry(
-        llm: Union[BaseFireworks, FireworksChat], **kwargs: Any
-    ) -> Any:
-        """Use tenacity to retry the completion call."""
-        answers = []
-        result = execute(kwargs["messages"], kwargs["model"], llm.fireworks_api_key)
-        print(result)
-        curr_string = json.loads(result)["choices"][0]["message"]
-        answers.append(curr_string)
+    @property
+    def _default_params(self) -> Dict[str, Any]:
+        """Get the default parameters for calling OpenAI API."""
+        return {
+            "model": self.model_id,
+            "max_tokens": self.max_tokens,
+            "stream": self.streaming,
+            "n": self.n,
+            "temperature": self.temperature,
+        }
 
-        return answers
+    def completion_with_retry(self, **kwargs: Any) -> Any:
+        """Use tenacity to retry the completion call."""
+        result = execute(self.fireworks_api_key, **kwargs)
+        curr_string = json.loads(result)
+
+        return curr_string
+
+    def _combine_llm_outputs(self, llm_outputs: List[Optional[dict]]) -> dict:
+        overall_token_usage: dict = {}
+        for output in llm_outputs:
+            if output is None:
+                # Happens in streaming
+                continue
+            token_usage = output["token_usage"]
+            for k, v in token_usage.items():
+                if k in overall_token_usage:
+                    overall_token_usage[k] += v
+                else:
+                    overall_token_usage[k] = v
+        return {"token_usage": overall_token_usage, "model_id": self.model_id}
 
     def _create_chat_result(self, response: Mapping[str, Any]) -> ChatResult:
-        print(response)
         generations = []
         for res in response["choices"]:
             message = _convert_dict_to_message(res["message"])
@@ -221,7 +256,7 @@ class ChatFireworks(BaseChatModel):
                 generation_info=dict(finish_reason=res.get("finish_reason")),
             )
             generations.append(gen)
-        llm_output = {"token_usage": response["usage"], "model_name": self.model_name}
+        llm_output = {"token_usage": response["usage"], "model_name": self.model_id}
         return ChatResult(generations=generations, llm_output=llm_output)
 
     def _generate(
@@ -240,8 +275,8 @@ class ChatFireworks(BaseChatModel):
         """
         message_dicts = [_convert_message_to_dict(m) for m in messages]
         params = {"model": self.model_id}
-        params = {**params, **kwargs}
-        response = self.completion_with_retry(messages=message_dicts, **params)
+        params = {**self._default_params, **kwargs, "messages": message_dicts}
+        response = self.completion_with_retry(**params)
         return self._create_chat_result(response)
 
     async def _agenerate(
@@ -254,7 +289,7 @@ class ChatFireworks(BaseChatModel):
         """Call out to Fireworks endpoint async with k unique prompts."""
         message_dicts = [_convert_message_to_dict(m) for m in messages]
         params = {"model": self.model_id}
-        params = {**params, **kwargs}
+        params = {**self._default_params, **kwargs}
         response = await acompletion_with_retry(self, messages=message_dicts, **params)
         return self._create_chat_result(response)
 
