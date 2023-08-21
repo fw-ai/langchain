@@ -46,5 +46,5 @@ __all__ = [
     "ChatAnyscale",
     "ChatLiteLLM",
     "ErnieBotChat",
-    ChatFireworks,
+    "ChatFireworks",
 ]

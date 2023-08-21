@@ -31,6 +31,16 @@ def test_chat_fireworks_model() -> None:
     assert chat.model_id == "bar"
 
 
+def test_chat_fireworks_system_message() -> None:
+    """Test ChatOpenAI wrapper with system message."""
+    chat = ChatFireworks(max_tokens=10)
+    system_message = SystemMessage(content="You are to chat with the user.")
+    human_message = HumanMessage(content="Hello")
+    response = chat([system_message, human_message])
+    assert isinstance(response, BaseMessage)
+    assert isinstance(response.content, str)
+
+
 def test_chat_fireworks_generate() -> None:
     """Test ChatFireworks wrapper with generate."""
     chat = ChatFireworks(max_tokens=10, n=2)
@@ -58,9 +68,30 @@ def test_chat_fireworks_multiple_completions() -> None:
         assert isinstance(generation.message.content, str)
 
 
+def test_chat_fireworks_streaming() -> None:
+    chat = ChatFireworks(
+        max_tokens=10,
+        streaming=True,
+        temperature=0,
+        verbose=True,
+    )
+    message = HumanMessage(content="Hello")
+    response = chat([message])
+    assert isinstance(response, BaseMessage)
+
+
 def test_chat_fireworks_llm_output_contains_model_id() -> None:
-    """Test llm_output contains model_name."""
+    """Test llm_output contains model_id."""
     chat = ChatFireworks(max_tokens=10)
+    message = HumanMessage(content="Hello")
+    llm_result = chat.generate([[message]])
+    assert llm_result.llm_output is not None
+    assert llm_result.llm_output["model_id"] == chat.model_id
+
+
+def test_chat_fireworks_streaming_llm_output_contains_model_id() -> None:
+    """Test llm_output contains model_id."""
+    chat = ChatFireworks(max_tokens=10, streaming=True)
     message = HumanMessage(content="Hello")
     llm_result = chat.generate([[message]])
     assert llm_result.llm_output is not None
@@ -81,3 +112,11 @@ async def test_async_chat_fireworks() -> None:
             assert isinstance(generation, ChatGeneration)
             assert isinstance(generation.text, str)
             assert generation.text == generation.message.content
+
+
+def test_fireworks_streaming() -> None:
+    """Test streaming tokens from OpenAI."""
+    llm = ChatFireworks(max_tokens=10)
+
+    for token in llm.stream("I'm Pickle Rick"):
+        assert isinstance(token.content, str)

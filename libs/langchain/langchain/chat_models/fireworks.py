@@ -1,5 +1,8 @@
 """Wrapper around Fireworks APIs."""
 from __future__ import annotations
+import httpx
+from httpx_sse import connect_sse
+from langchain.schema.output import ChatGenerationChunk
 
 import requests
 import json
@@ -10,6 +13,7 @@ from typing import (
     Any,
     Callable,
     Dict,
+    Iterator,
     List,
     Mapping,
     Optional,
@@ -19,7 +23,7 @@ from typing import (
 )
 from ..llms.fireworks import BaseFireworks, FireworksChat
 
-from pydantic import BaseModel, Field, root_validator
+from langchain.pydantic_v1 import BaseModel, Field, root_validator
 from pydantic.types import StrictBool, StrictInt, StrictFloat, StrictStr
 from tenacity import (
     before_sleep_log,
@@ -40,11 +44,17 @@ from langchain.schema import (
 )
 from langchain.schema.messages import (
     AIMessage,
+    AIMessageChunk,
     BaseMessage,
+    BaseMessageChunk,
     ChatMessage,
+    ChatMessageChunk,
     FunctionMessage,
+    FunctionMessageChunk,
     HumanMessage,
+    HumanMessageChunk,
     SystemMessage,
+    SystemMessageChunk,
 )
 from langchain.utils import get_from_dict_or_env
 
@@ -156,6 +166,30 @@ def _convert_message_to_dict(message: BaseMessage) -> dict:
     return message_dict
 
 
+def _convert_delta_to_message_chunk(
+    _dict: Mapping[str, Any], default_class: type[BaseMessageChunk]
+) -> BaseMessageChunk:
+    role = _dict.get("role")
+    content = _dict.get("content") or ""
+    if _dict.get("function_call"):
+        additional_kwargs = {"function_call": dict(_dict["function_call"])}
+    else:
+        additional_kwargs = {}
+
+    if role == "user" or default_class == HumanMessageChunk:
+        return HumanMessageChunk(content=content)
+    elif role == "assistant" or default_class == AIMessageChunk:
+        return AIMessageChunk(content=content, additional_kwargs=additional_kwargs)
+    elif role == "system" or default_class == SystemMessageChunk:
+        return SystemMessageChunk(content=content)
+    elif role == "function" or default_class == FunctionMessageChunk:
+        return FunctionMessageChunk(content=content, name=_dict["name"])
+    elif role or default_class == ChatMessageChunk:
+        return ChatMessageChunk(content=content, role=role)
+    else:
+        return default_class(content=content)
+
+
 class ChatFireworks(BaseChatModel):
     """Wrapper around Fireworks Chat large language models.
 
@@ -228,10 +262,25 @@ class ChatFireworks(BaseChatModel):
 
     def completion_with_retry(self, **kwargs: Any) -> Any:
         """Use tenacity to retry the completion call."""
-        result = execute(self.fireworks_api_key, **kwargs)
-        curr_string = json.loads(result)
+        if kwargs["stream"]:
+            url = "https://api.fireworks.ai/inference/v1/chat/completions"
+            with httpx.Client(
+                headers={"Authorization": f"Bearer {self.fireworks_api_key}"},
+                timeout=self.request_timeout,
+            ) as client:
+                with connect_sse(
+                    client, url=url, method="POST", json=kwargs
+                ) as event_source:
+                    for sse in event_source.iter_sse():
+                        if sse.data == "[DONE]":
+                            break
+                        yield json.loads(sse.data)
 
-        return curr_string
+        else:
+            result = execute(self.fireworks_api_key, **kwargs)
+            curr_string = json.loads(result)
+
+            return curr_string
 
     def _combine_llm_outputs(self, llm_outputs: List[Optional[dict]]) -> dict:
         overall_token_usage: dict = {}
@@ -259,11 +308,36 @@ class ChatFireworks(BaseChatModel):
         llm_output = {"token_usage": response["usage"], "model_name": self.model_id}
         return ChatResult(generations=generations, llm_output=llm_output)
 
+    def _stream(
+        self,
+        messages: List[BaseMessage],
+        stop: Optional[List[str]] = None,
+        run_manager: Optional[CallbackManagerForLLMRun] = None,
+        **kwargs: Any,
+    ) -> Iterator[ChatGenerationChunk]:
+        message_dicts = [_convert_message_to_dict(m) for m in messages]
+        params = {
+            **self._default_params,
+            **kwargs,
+            "messages": message_dicts,
+            "stream": True,
+        }
+        params["model"] = self.model_id
+        default_chunk_class = AIMessageChunk
+        for chunk in self.completion_with_retry(**params):
+            if len(chunk["choices"]) == 0:
+                continue
+            delta = chunk["choices"][0]["delta"]
+            chunk = _convert_delta_to_message_chunk(delta, default_chunk_class)
+            default_chunk_class = chunk.__class__
+            yield ChatGenerationChunk(message=chunk)
+
     def _generate(
         self,
         messages: List[BaseMessage],
         stop: Optional[List[str]] = None,
         run_manager: Optional[CallbackManagerForLLMRun] = None,
+        stream: Optional[bool] = None,
         **kwargs: Any,
     ) -> ChatResult:
         """Call out to Fireworks endpoint with k unique prompts.
@@ -273,9 +347,19 @@ class ChatFireworks(BaseChatModel):
         Returns:
             The full LLM output.
         """
+        if stream if stream is not None else self.streaming:
+            generation: Optional[ChatGenerationChunk] = None
+            for chunk in self._stream(messages=messages, stop=stop, **kwargs):
+                if generation is None:
+                    generation = chunk
+                else:
+                    generation += chunk
+            assert generation is not None
+            return ChatResult(generations=[generation])
+
         message_dicts = [_convert_message_to_dict(m) for m in messages]
-        params = {"model": self.model_id}
         params = {**self._default_params, **kwargs, "messages": message_dicts}
+        params["model"] = self.model_id
         response = self.completion_with_retry(**params)
         return self._create_chat_result(response)
 
