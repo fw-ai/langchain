@@ -260,27 +260,25 @@ class ChatFireworks(BaseChatModel):
             "temperature": self.temperature,
         }
 
+    def stream_completion_with_retry(self, **kwargs: Any) -> Any:
+        url = "https://api.fireworks.ai/inference/v1/chat/completions"
+        with httpx.Client(
+            headers={"Authorization": f"Bearer {self.fireworks_api_key}"},
+            timeout=self.request_timeout,
+        ) as client:
+            with connect_sse(
+                client, url=url, method="POST", json=kwargs
+            ) as event_source:
+                for sse in event_source.iter_sse():
+                    if sse.data == "[DONE]":
+                        break
+                    yield json.loads(sse.data)
+
     def completion_with_retry(self, **kwargs: Any) -> Any:
-        """Use tenacity to retry the completion call."""
-        if kwargs["stream"]:
-            url = "https://api.fireworks.ai/inference/v1/chat/completions"
-            with httpx.Client(
-                headers={"Authorization": f"Bearer {self.fireworks_api_key}"},
-                timeout=self.request_timeout,
-            ) as client:
-                with connect_sse(
-                    client, url=url, method="POST", json=kwargs
-                ) as event_source:
-                    for sse in event_source.iter_sse():
-                        if sse.data == "[DONE]":
-                            break
-                        yield json.loads(sse.data)
+        result = execute(self.fireworks_api_key, **kwargs)
+        curr_string = json.loads(result)
 
-        else:
-            result = execute(self.fireworks_api_key, **kwargs)
-            curr_string = json.loads(result)
-
-            return curr_string
+        return curr_string
 
     def _combine_llm_outputs(self, llm_outputs: List[Optional[dict]]) -> dict:
         overall_token_usage: dict = {}
@@ -324,7 +322,7 @@ class ChatFireworks(BaseChatModel):
         }
         params["model"] = self.model_id
         default_chunk_class = AIMessageChunk
-        for chunk in self.completion_with_retry(**params):
+        for chunk in self.stream_completion_with_retry(**params):
             if len(chunk["choices"]) == 0:
                 continue
             delta = chunk["choices"][0]["delta"]
@@ -372,8 +370,8 @@ class ChatFireworks(BaseChatModel):
     ) -> ChatResult:
         """Call out to Fireworks endpoint async with k unique prompts."""
         message_dicts = [_convert_message_to_dict(m) for m in messages]
-        params = {"model": self.model_id}
         params = {**self._default_params, **kwargs}
+        params["model"] = self.model_id
         response = await acompletion_with_retry(self, messages=message_dicts, **params)
         return self._create_chat_result(response)
 
