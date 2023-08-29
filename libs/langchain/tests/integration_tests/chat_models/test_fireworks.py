@@ -32,7 +32,7 @@ def test_chat_fireworks_model() -> None:
 
 
 def test_chat_fireworks_system_message() -> None:
-    """Test ChatOpenAI wrapper with system message."""
+    """Test ChatFireworks wrapper with system message."""
     chat = ChatFireworks(max_tokens=10)
     system_message = SystemMessage(content="You are to chat with the user.")
     human_message = HumanMessage(content="Hello")

@@ -251,7 +251,7 @@ class ChatFireworks(BaseChatModel):
 
     @property
     def _default_params(self) -> Dict[str, Any]:
-        """Get the default parameters for calling OpenAI API."""
+        """Get the default parameters for calling Fireworks API."""
         return {
             "model": self.model_id,
             "max_tokens": self.max_tokens,
