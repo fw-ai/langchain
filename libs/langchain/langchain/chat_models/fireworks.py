@@ -1,13 +1,46 @@
 import os
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Mapping, Optional, Tuple
 from langchain.adapters.openai import convert_dict_to_message, convert_message_to_dict
 
-from langchain.callbacks.manager import CallbackManagerForLLMRun
-from langchain.chat_models.base import BaseChatModel, SimpleChatModel
-from langchain.llms.base import LLM
-from langchain.schema.messages import BaseMessage
-from langchain.schema.output import ChatGeneration, ChatResult
+from langchain.callbacks.manager import (
+    CallbackManagerForLLMRun,
+)
+from langchain.chat_models.base import BaseChatModel
+from langchain.schema.messages import (
+    AIMessageChunk,
+    BaseMessage,
+    BaseMessageChunk,
+    ChatMessageChunk,
+    FunctionMessageChunk,
+    HumanMessageChunk,
+    SystemMessageChunk,
+)
+from langchain.schema.output import ChatGeneration, ChatGenerationChunk, ChatResult
 import openai
+
+
+def _convert_delta_to_message_chunk(
+    _dict: Mapping[str, Any], default_class: type[BaseMessageChunk]
+) -> BaseMessageChunk:
+    role = _dict.get("role")
+    content = _dict.get("content") or ""
+    if _dict.get("function_call"):
+        additional_kwargs = {"function_call": dict(_dict["function_call"])}
+    else:
+        additional_kwargs = {}
+
+    if role == "user" or default_class == HumanMessageChunk:
+        return HumanMessageChunk(content=content)
+    elif role == "assistant" or default_class == AIMessageChunk:
+        return AIMessageChunk(content=content, additional_kwargs=additional_kwargs)
+    elif role == "system" or default_class == SystemMessageChunk:
+        return SystemMessageChunk(content=content)
+    elif role == "function" or default_class == FunctionMessageChunk:
+        return FunctionMessageChunk(content=content, name=_dict["name"])
+    elif role or default_class == ChatMessageChunk:
+        return ChatMessageChunk(content=content, role=role)
+    else:
+        return default_class(content=content)
 
 
 class ChatFireworks(BaseChatModel):
@@ -28,11 +61,27 @@ class ChatFireworks(BaseChatModel):
         messages: List[BaseMessage],
         stop: Optional[List[str]] = None,
         run_manager: Optional[CallbackManagerForLLMRun] = None,
-        stream: Optional[bool] = None,
         **kwargs: Any,
     ) -> ChatResult:
         message_dicts = self._create_message_dicts(messages, stop)
         response = openai.ChatCompletion.create(
+            api_base=self.fireworks_api_url,
+            api_key=self.fireworks_api_key,
+            model=self.model,
+            messages=message_dicts,
+            **self.model_kwargs,
+        )
+        return self._create_chat_result(response)
+
+    async def _agenerate(
+        self,
+        messages: List[BaseMessage],
+        stop: Optional[List[str]] = None,
+        run_manager: Optional[CallbackManagerForLLMRun] = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        message_dicts = self._create_message_dicts(messages, stop)
+        response = await openai.ChatCompletion.acreate(
             api_base=self.fireworks_api_url,
             api_key=self.fireworks_api_key,
             model=self.model,
@@ -61,3 +110,31 @@ class ChatFireworks(BaseChatModel):
     ) -> Tuple[List[Dict[str, Any]]]:
         message_dicts = [convert_message_to_dict(m) for m in messages]
         return message_dicts
+
+    def _stream(
+        self,
+        messages: List[BaseMessage],
+        stop: Optional[List[str]] = None,
+        run_manager: Optional[CallbackManagerForLLMRun] = None,
+        **kwargs: Any,
+    ) -> Iterator[ChatGenerationChunk]:
+        message_dicts = self._create_message_dicts(messages, stop)
+        default_chunk_class = AIMessageChunk
+        for chunk in openai.ChatCompletion.create(
+            api_base=self.fireworks_api_url,
+            api_key=self.fireworks_api_key,
+            model=self.model,
+            messages=message_dicts,
+            stream=True,
+            **self.model_kwargs,
+        ):
+            choice = chunk["choices"][0]
+            chunk = _convert_delta_to_message_chunk(
+                choice["delta"], default_chunk_class
+            )
+            finish_reason = choice.get("finish_reason")
+            generation_info = (
+                dict(finish_reason=finish_reason) if finish_reason is not None else None
+            )
+            default_chunk_class = chunk.__class__
+            yield ChatGenerationChunk(message=chunk, generation_info=generation_info)

@@ -29,7 +29,7 @@ def test_chat_fireworks_model() -> None:
 
 def test_chat_fireworks_system_message() -> None:
     """Test ChatFireworks wrapper with system message."""
-    chat = ChatFireworks(max_tokens=10)
+    chat = ChatFireworks()
     system_message = SystemMessage(content="You are to chat with the user.")
     human_message = HumanMessage(content="Hello")
     response = chat([system_message, human_message])
@@ -71,3 +71,36 @@ def test_chat_fireworks_llm_output_contains_model_id() -> None:
     llm_result = chat.generate([[message]])
     assert llm_result.llm_output is not None
     assert llm_result.llm_output["model"] == chat.model
+
+
+def test_fireworks_streaming() -> None:
+    """Test streaming tokens from OpenAI."""
+    llm = ChatFireworks()
+
+    for token in llm.stream("I'm Pickle Rick"):
+        assert isinstance(token.content, str)
+
+
+@pytest.mark.asyncio
+async def test_chat_fireworks_agenerate() -> None:
+    """Test ChatFireworks wrapper with generate."""
+    chat = ChatFireworks(model_kwargs={"n": 2})
+    message = HumanMessage(content="Hello")
+    response = await chat.agenerate([[message], [message]])
+    assert isinstance(response, LLMResult)
+    assert len(response.generations) == 2
+    for generations in response.generations:
+        assert len(generations) == 2
+        for generation in generations:
+            assert isinstance(generation, ChatGeneration)
+            assert isinstance(generation.text, str)
+            assert generation.text == generation.message.content
+
+
+@pytest.mark.asyncio
+async def test_fireworks_astream() -> None:
+    """Test streaming tokens from OpenAI."""
+    llm = ChatFireworks()
+
+    async for token in llm.astream("Who's the best quarterback in the NFL?"):
+        assert isinstance(token.content, str)
