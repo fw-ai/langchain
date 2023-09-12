@@ -27,10 +27,10 @@ def _stream_response_to_generation_chunk(
 class Fireworks(LLM):
     """Fireworks models."""
 
-    model = "accounts/fireworks/models/llama-v2-13b-chat"
+    model = "accounts/fireworks/models/llama-v2-7b-chat"
     model_kwargs: Optional[dict] = {"temperature": 0.7, "max_tokens": 512, "top_p": 1}
     fireworks_api_url: Optional[str] = "https://api.fireworks.ai/inference/v1"
-    fireworks_api_key: Optional[str] = os.environ.get("FIREWORKS_API_KEY")
+    fireworks_api_key: Optional[str] = None
 
     @property
     def _llm_type(self) -> str:
@@ -46,7 +46,7 @@ class Fireworks(LLM):
     ) -> str:
         response = openai.Completion.create(
             api_base=self.fireworks_api_url,
-            api_key=self.fireworks_api_key,
+            api_key=os.environ.get("FIREWORKS_API_KEY"),
             model=self.model,
             prompt=prompt,
             **self.model_kwargs,
@@ -62,7 +62,7 @@ class Fireworks(LLM):
     ) -> Iterator[GenerationChunk]:
         for stream_resp in openai.Completion.create(
             api_base=self.fireworks_api_url,
-            api_key=self.fireworks_api_key,
+            api_key=os.environ.get("FIREWORKS_API_KEY"),
             model=self.model,
             prompt=prompt,
             stream=True,

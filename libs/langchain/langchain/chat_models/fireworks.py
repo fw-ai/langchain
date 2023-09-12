@@ -46,10 +46,10 @@ def _convert_delta_to_message_chunk(
 class ChatFireworks(BaseChatModel):
     """Fireworks Chat models."""
 
-    model = "accounts/fireworks/models/llama-v2-13b-chat"
+    model = "accounts/fireworks/models/llama-v2-7b-chat"
     model_kwargs: Optional[dict] = {"temperature": 0.7, "max_tokens": 512, "top_p": 1}
     fireworks_api_url: Optional[str] = "https://api.fireworks.ai/inference/v1"
-    fireworks_api_key: Optional[str] = os.environ.get("FIREWORKS_API_KEY")
+    fireworks_api_key: Optional[str] = None
 
     @property
     def _llm_type(self) -> str:
@@ -66,7 +66,7 @@ class ChatFireworks(BaseChatModel):
         message_dicts = self._create_message_dicts(messages, stop)
         response = openai.ChatCompletion.create(
             api_base=self.fireworks_api_url,
-            api_key=self.fireworks_api_key,
+            api_key=os.environ.get("FIREWORKS_API_KEY"),
             model=self.model,
             messages=message_dicts,
             **self.model_kwargs,
@@ -83,7 +83,7 @@ class ChatFireworks(BaseChatModel):
         message_dicts = self._create_message_dicts(messages, stop)
         response = await openai.ChatCompletion.acreate(
             api_base=self.fireworks_api_url,
-            api_key=self.fireworks_api_key,
+            api_key=os.environ.get("FIREWORKS_API_KEY"),
             model=self.model,
             messages=message_dicts,
             **self.model_kwargs,
@@ -122,7 +122,7 @@ class ChatFireworks(BaseChatModel):
         default_chunk_class = AIMessageChunk
         for chunk in openai.ChatCompletion.create(
             api_base=self.fireworks_api_url,
-            api_key=self.fireworks_api_key,
+            api_key=os.environ.get("FIREWORKS_API_KEY"),
             model=self.model,
             messages=message_dicts,
             stream=True,
