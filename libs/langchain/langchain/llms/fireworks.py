@@ -1,9 +1,12 @@
 import os
 from typing import Any, Dict, Iterator, List, Optional
 
+import backoff
+
 from langchain.callbacks.manager import (
     CallbackManagerForLLMRun,
 )
+from langchain.chat_models.openai import _create_retry_decorator
 from langchain.llms.base import LLM
 from langchain.schema.language_model import LanguageModelInput
 from langchain.schema.output import GenerationChunk
@@ -29,8 +32,9 @@ class Fireworks(LLM):
 
     model = "accounts/fireworks/models/llama-v2-7b-chat"
     model_kwargs: Optional[dict] = {"temperature": 0.7, "max_tokens": 512, "top_p": 1}
-    fireworks_api_url: Optional[str] = "https://api.fireworks.ai/inference/v1"
+    fireworks_api_base: Optional[str] = "https://api.fireworks.ai/inference/v1"
     fireworks_api_key: Optional[str] = None
+    max_retries: int = 20
 
     @property
     def _llm_type(self) -> str:
@@ -44,13 +48,13 @@ class Fireworks(LLM):
         run_manager: Optional[CallbackManagerForLLMRun] = None,
         **kwargs: Any,
     ) -> str:
-        response = openai.Completion.create(
-            api_base=self.fireworks_api_url,
-            api_key=os.environ.get("FIREWORKS_API_KEY"),
-            model=self.model,
-            prompt=prompt,
+        params = {
+            "model": self.model,
+            "prompt": prompt,
             **self.model_kwargs,
-        )
+        }
+        response = self.completion_with_retry(**params)
+
         return response["choices"][0]["text"]
 
     def _stream(
@@ -60,14 +64,13 @@ class Fireworks(LLM):
         run_manager: Optional[CallbackManagerForLLMRun] = None,
         **kwargs: Any,
     ) -> Iterator[GenerationChunk]:
-        for stream_resp in openai.Completion.create(
-            api_base=self.fireworks_api_url,
-            api_key=os.environ.get("FIREWORKS_API_KEY"),
-            model=self.model,
-            prompt=prompt,
-            stream=True,
+        params = {
+            "model": self.model,
+            "prompt": prompt,
+            "stream": True,
             **self.model_kwargs,
-        ):
+        }
+        for stream_resp in self.completion_with_retry(**params):
             chunk = _stream_response_to_generation_chunk(stream_resp)
             yield chunk
 
@@ -88,3 +91,19 @@ class Fireworks(LLM):
             else:
                 generation += chunk
         assert generation is not None
+
+    def completion_with_retry(
+        self, run_manager: Optional[CallbackManagerForLLMRun] = None, **kwargs: Any
+    ) -> Any:
+        """Use tenacity to retry the completion call."""
+        retry_decorator = _create_retry_decorator(self, run_manager=run_manager)
+
+        @retry_decorator
+        def _completion_with_retry(**kwargs: Any) -> Any:
+            return openai.Completion.create(
+                api_base="https://api.fireworks.ai/inference/v1",
+                api_key=os.environ.get("FIREWORKS_API_KEY"),
+                **kwargs,
+            )
+
+        return _completion_with_retry(**kwargs)

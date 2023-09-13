@@ -1,11 +1,15 @@
 import os
+import time
 from typing import Any, Dict, Iterator, List, Mapping, Optional, Tuple
+
+import backoff
 from langchain.adapters.openai import convert_dict_to_message, convert_message_to_dict
 
 from langchain.callbacks.manager import (
     CallbackManagerForLLMRun,
 )
 from langchain.chat_models.base import BaseChatModel
+from langchain.chat_models.openai import _create_retry_decorator
 from langchain.schema.messages import (
     AIMessageChunk,
     BaseMessage,
@@ -48,8 +52,9 @@ class ChatFireworks(BaseChatModel):
 
     model = "accounts/fireworks/models/llama-v2-7b-chat"
     model_kwargs: Optional[dict] = {"temperature": 0.7, "max_tokens": 512, "top_p": 1}
-    fireworks_api_url: Optional[str] = "https://api.fireworks.ai/inference/v1"
+    fireworks_api_base: Optional[str] = "https://api.fireworks.ai/inference/v1"
     fireworks_api_key: Optional[str] = None
+    max_retries: int = 20
 
     @property
     def _llm_type(self) -> str:
@@ -64,13 +69,13 @@ class ChatFireworks(BaseChatModel):
         **kwargs: Any,
     ) -> ChatResult:
         message_dicts = self._create_message_dicts(messages, stop)
-        response = openai.ChatCompletion.create(
-            api_base=self.fireworks_api_url,
-            api_key=os.environ.get("FIREWORKS_API_KEY"),
-            model=self.model,
-            messages=message_dicts,
+
+        params = {
+            "model": self.model,
+            "messages": message_dicts,
             **self.model_kwargs,
-        )
+        }
+        response = self.completion_with_retry(**params)
         return self._create_chat_result(response)
 
     async def _agenerate(
@@ -82,7 +87,7 @@ class ChatFireworks(BaseChatModel):
     ) -> ChatResult:
         message_dicts = self._create_message_dicts(messages, stop)
         response = await openai.ChatCompletion.acreate(
-            api_base=self.fireworks_api_url,
+            api_base=self.fireworks_api_base,
             api_key=os.environ.get("FIREWORKS_API_KEY"),
             model=self.model,
             messages=message_dicts,
@@ -120,14 +125,13 @@ class ChatFireworks(BaseChatModel):
     ) -> Iterator[ChatGenerationChunk]:
         message_dicts = self._create_message_dicts(messages, stop)
         default_chunk_class = AIMessageChunk
-        for chunk in openai.ChatCompletion.create(
-            api_base=self.fireworks_api_url,
-            api_key=os.environ.get("FIREWORKS_API_KEY"),
-            model=self.model,
-            messages=message_dicts,
-            stream=True,
+        params = {
+            "model": self.model,
+            "messages": message_dicts,
+            "stream": True,
             **self.model_kwargs,
-        ):
+        }
+        for chunk in self.completion_with_retry(**params):
             choice = chunk["choices"][0]
             chunk = _convert_delta_to_message_chunk(
                 choice["delta"], default_chunk_class
@@ -138,3 +142,19 @@ class ChatFireworks(BaseChatModel):
             )
             default_chunk_class = chunk.__class__
             yield ChatGenerationChunk(message=chunk, generation_info=generation_info)
+
+    def completion_with_retry(
+        self, run_manager: Optional[CallbackManagerForLLMRun] = None, **kwargs: Any
+    ) -> Any:
+        """Use tenacity to retry the completion call."""
+        retry_decorator = _create_retry_decorator(self, run_manager=run_manager)
+
+        @retry_decorator
+        def _completion_with_retry(**kwargs: Any) -> Any:
+            return openai.ChatCompletion.create(
+                api_base="https://api.fireworks.ai/inference/v1",
+                api_key=os.environ.get("FIREWORKS_API_KEY"),
+                **kwargs,
+            )
+
+        return _completion_with_retry(**kwargs)
