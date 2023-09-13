@@ -64,6 +64,22 @@ class Fireworks(LLM):
 
         return response.choices[0].text
 
+    async def _acall(
+        self,
+        prompt: str,
+        stop: Optional[List[str]] = None,
+        run_manager: Optional[CallbackManagerForLLMRun] = None,
+        **kwargs: Any,
+    ) -> str:
+        params = {
+            "model": self.model,
+            "prompt": prompt,
+            **self.model_kwargs,
+        }
+        response = await acompletion_with_retry(self, **params)
+
+        return response.choices[0].text
+
     def _stream(
         self,
         prompt: str,
@@ -81,6 +97,23 @@ class Fireworks(LLM):
             chunk = _stream_response_to_generation_chunk(stream_resp)
             yield chunk
 
+    async def _astream(
+        self,
+        prompt: str,
+        stop: Optional[List[str]] = None,
+        run_manager: Optional[CallbackManagerForLLMRun] = None,
+        **kwargs: Any,
+    ) -> Iterator[GenerationChunk]:
+        params = {
+            "model": self.model,
+            "prompt": prompt,
+            "stream": True,
+            **self.model_kwargs,
+        }
+        async for stream_resp in await acompletion_with_retry_streaming(self, **params):
+            chunk = _stream_response_to_generation_chunk(stream_resp)
+            yield chunk
+
     def stream(
         self,
         input: LanguageModelInput,
@@ -92,6 +125,24 @@ class Fireworks(LLM):
         prompt = self._convert_input(input).to_string()
         generation: Optional[GenerationChunk] = None
         for chunk in self._stream(prompt):
+            yield chunk.text
+            if generation is None:
+                generation = chunk
+            else:
+                generation += chunk
+        assert generation is not None
+
+    async def astream(
+        self,
+        input: LanguageModelInput,
+        config: Optional[RunnableConfig] = None,
+        *,
+        stop: Optional[List[str]] = None,
+        **kwargs: Any,
+    ) -> Iterator[str]:
+        prompt = self._convert_input(input).to_string()
+        generation: Optional[GenerationChunk] = None
+        async for chunk in self._astream(prompt):
             yield chunk.text
             if generation is None:
                 generation = chunk
@@ -115,6 +166,40 @@ def completion_with_retry(
         )
 
     return _completion_with_retry(**kwargs)
+
+
+async def acompletion_with_retry(
+    llm: Fireworks,
+    run_manager: Optional[CallbackManagerForLLMRun] = None,
+    **kwargs: Any,
+) -> Any:
+    """Use tenacity to retry the completion call."""
+    retry_decorator = _create_retry_decorator(llm, run_manager=run_manager)
+
+    @retry_decorator
+    async def _completion_with_retry(**kwargs: Any) -> Any:
+        return await fireworks.client.Completion.acreate(
+            **kwargs,
+        )
+
+    return await _completion_with_retry(**kwargs)
+
+
+async def acompletion_with_retry_streaming(
+    llm: Fireworks,
+    run_manager: Optional[CallbackManagerForLLMRun] = None,
+    **kwargs: Any,
+) -> Any:
+    """Use tenacity to retry the completion call."""
+    retry_decorator = _create_retry_decorator(llm, run_manager=run_manager)
+
+    @retry_decorator
+    async def _completion_with_retry(**kwargs: Any) -> Any:
+        return fireworks.client.Completion.acreate(
+            **kwargs,
+        )
+
+    return await _completion_with_retry(**kwargs)
 
 
 def _create_retry_decorator(

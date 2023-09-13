@@ -1,3 +1,4 @@
+import fireworks
 import fireworks.client
 from langchain.utils.env import get_from_dict_or_env
 from pydantic import root_validator
@@ -119,7 +120,7 @@ class ChatFireworks(BaseChatModel):
             "messages": message_dicts,
             **self.model_kwargs,
         }
-        response = completion_with_retry(self, **params)
+        response = await acompletion_with_retry(self, **params)
         return self._create_chat_result(response)
 
     def _combine_llm_outputs(self, llm_outputs: List[Optional[dict]]) -> dict:
@@ -168,6 +169,31 @@ class ChatFireworks(BaseChatModel):
             default_chunk_class = chunk.__class__
             yield ChatGenerationChunk(message=chunk, generation_info=generation_info)
 
+    async def _astream(
+        self,
+        messages: List[BaseMessage],
+        stop: Optional[List[str]] = None,
+        run_manager: Optional[CallbackManagerForLLMRun] = None,
+        **kwargs: Any,
+    ) -> Iterator[ChatGenerationChunk]:
+        message_dicts = self._create_message_dicts(messages, stop)
+        default_chunk_class = AIMessageChunk
+        params = {
+            "model": self.model,
+            "messages": message_dicts,
+            "stream": True,
+            **self.model_kwargs,
+        }
+        async for chunk in await acompletion_with_retry_streaming(self, **params):
+            choice = chunk.choices[0]
+            chunk = _convert_delta_to_message_chunk(choice.delta, default_chunk_class)
+            finish_reason = choice.finish_reason
+            generation_info = (
+                dict(finish_reason=finish_reason) if finish_reason is not None else None
+            )
+            default_chunk_class = chunk.__class__
+            yield ChatGenerationChunk(message=chunk, generation_info=generation_info)
+
 
 def completion_with_retry(
     llm: ChatFireworks,
@@ -187,6 +213,23 @@ def completion_with_retry(
 
 
 async def acompletion_with_retry(
+    llm: ChatFireworks,
+    run_manager: Optional[AsyncCallbackManagerForLLMRun] = None,
+    **kwargs: Any,
+) -> Any:
+    """Use tenacity to retry the async completion call."""
+    retry_decorator = _create_retry_decorator(llm, run_manager=run_manager)
+
+    @retry_decorator
+    async def _completion_with_retry(**kwargs: Any) -> Any:
+        return await fireworks.client.ChatCompletion.acreate(
+            **kwargs,
+        )
+
+    return await _completion_with_retry(**kwargs)
+
+
+async def acompletion_with_retry_streaming(
     llm: ChatFireworks,
     run_manager: Optional[AsyncCallbackManagerForLLMRun] = None,
     **kwargs: Any,
