@@ -1,17 +1,15 @@
-import os
-from typing import Any, Dict, Iterator, List, Optional
-
-import backoff
-
+import fireworks.client
+from typing import Any, Callable, Dict, Iterator, List, Optional, Union
 from langchain.callbacks.manager import (
+    AsyncCallbackManagerForLLMRun,
     CallbackManagerForLLMRun,
 )
-from langchain.chat_models.openai import _create_retry_decorator
-from langchain.llms.base import LLM
+from langchain.llms.base import LLM, create_base_retry_decorator
 from langchain.schema.language_model import LanguageModelInput
 from langchain.schema.output import GenerationChunk
 from langchain.schema.runnable.config import RunnableConfig
-import openai
+from langchain.utils.env import get_from_dict_or_env
+from pydantic import root_validator
 
 
 def _stream_response_to_generation_chunk(
@@ -19,10 +17,10 @@ def _stream_response_to_generation_chunk(
 ) -> GenerationChunk:
     """Convert a stream response to a generation chunk."""
     return GenerationChunk(
-        text=stream_response["choices"][0]["text"],
+        text=stream_response.choices[0].text,
         generation_info=dict(
-            finish_reason=stream_response["choices"][0].get("finish_reason", None),
-            logprobs=stream_response["choices"][0].get("logprobs", None),
+            finish_reason=stream_response.choices[0].finish_reason,
+            logprobs=stream_response.choices[0].logprobs,
         ),
     )
 
@@ -32,9 +30,16 @@ class Fireworks(LLM):
 
     model = "accounts/fireworks/models/llama-v2-7b-chat"
     model_kwargs: Optional[dict] = {"temperature": 0.7, "max_tokens": 512, "top_p": 1}
-    fireworks_api_base: Optional[str] = "https://api.fireworks.ai/inference/v1"
     fireworks_api_key: Optional[str] = None
     max_retries: int = 20
+
+    @root_validator()
+    def validate_environment(cls, values: Dict) -> Dict:
+        """Validate that api key and python package exists in environment."""
+        values["fireworks_api_key"] = get_from_dict_or_env(
+            values, "fireworks_api_key", "FIREWORKS_API_KEY"
+        )
+        return values
 
     @property
     def _llm_type(self) -> str:
@@ -53,9 +58,9 @@ class Fireworks(LLM):
             "prompt": prompt,
             **self.model_kwargs,
         }
-        response = self.completion_with_retry(**params)
+        response = completion_with_retry(self, **params)
 
-        return response["choices"][0]["text"]
+        return response.choices[0].text
 
     def _stream(
         self,
@@ -70,7 +75,7 @@ class Fireworks(LLM):
             "stream": True,
             **self.model_kwargs,
         }
-        for stream_resp in self.completion_with_retry(**params):
+        for stream_resp in completion_with_retry(self, **params):
             chunk = _stream_response_to_generation_chunk(stream_resp)
             yield chunk
 
@@ -92,18 +97,34 @@ class Fireworks(LLM):
                 generation += chunk
         assert generation is not None
 
-    def completion_with_retry(
-        self, run_manager: Optional[CallbackManagerForLLMRun] = None, **kwargs: Any
-    ) -> Any:
-        """Use tenacity to retry the completion call."""
-        retry_decorator = _create_retry_decorator(self, run_manager=run_manager)
 
-        @retry_decorator
-        def _completion_with_retry(**kwargs: Any) -> Any:
-            return openai.Completion.create(
-                api_base="https://api.fireworks.ai/inference/v1",
-                api_key=os.environ.get("FIREWORKS_API_KEY"),
-                **kwargs,
-            )
+def completion_with_retry(
+    llm: Fireworks,
+    run_manager: Optional[CallbackManagerForLLMRun] = None,
+    **kwargs: Any,
+) -> Any:
+    """Use tenacity to retry the completion call."""
+    retry_decorator = _create_retry_decorator(llm, run_manager=run_manager)
 
-        return _completion_with_retry(**kwargs)
+    @retry_decorator
+    def _completion_with_retry(**kwargs: Any) -> Any:
+        return fireworks.client.Completion.create(
+            **kwargs,
+        )
+
+    return _completion_with_retry(**kwargs)
+
+
+def _create_retry_decorator(
+    llm: Fireworks,
+    run_manager: Optional[
+        Union[AsyncCallbackManagerForLLMRun, CallbackManagerForLLMRun]
+    ] = None,
+) -> Callable[[Any], Any]:
+    errors = [
+        fireworks.client.error.RateLimitError,
+        fireworks.client.error.ServiceUnavailableError,
+    ]
+    return create_base_retry_decorator(
+        error_types=errors, max_retries=llm.max_retries, run_manager=run_manager
+    )

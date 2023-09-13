@@ -1,16 +1,23 @@
-import os
-import time
-from typing import Any, Dict, Iterator, List, Mapping, Optional, Tuple
-
-import backoff
-from langchain.adapters.openai import convert_dict_to_message, convert_message_to_dict
-
+import fireworks.client
+from langchain.utils.env import get_from_dict_or_env
+from pydantic import root_validator
+from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Tuple, Union
+from langchain.adapters.openai import convert_message_to_dict
 from langchain.callbacks.manager import (
+    AsyncCallbackManagerForLLMRun,
     CallbackManagerForLLMRun,
 )
 from langchain.chat_models.base import BaseChatModel
-from langchain.chat_models.openai import _create_retry_decorator
+from langchain.llms.base import create_base_retry_decorator
 from langchain.schema.messages import (
+    AIMessage,
+    AIMessageChunk,
+    BaseMessage,
+    BaseMessageChunk,
+    ChatMessage,
+    FunctionMessage,
+    HumanMessage,
+    SystemMessage,
     AIMessageChunk,
     BaseMessage,
     BaseMessageChunk,
@@ -20,18 +27,14 @@ from langchain.schema.messages import (
     SystemMessageChunk,
 )
 from langchain.schema.output import ChatGeneration, ChatGenerationChunk, ChatResult
-import openai
 
 
 def _convert_delta_to_message_chunk(
     _dict: Mapping[str, Any], default_class: type[BaseMessageChunk]
 ) -> BaseMessageChunk:
-    role = _dict.get("role")
-    content = _dict.get("content") or ""
-    if _dict.get("function_call"):
-        additional_kwargs = {"function_call": dict(_dict["function_call"])}
-    else:
-        additional_kwargs = {}
+    role = _dict.role
+    content = _dict.content or ""
+    additional_kwargs = {}
 
     if role == "user" or default_class == HumanMessageChunk:
         return HumanMessageChunk(content=content)
@@ -40,11 +43,28 @@ def _convert_delta_to_message_chunk(
     elif role == "system" or default_class == SystemMessageChunk:
         return SystemMessageChunk(content=content)
     elif role == "function" or default_class == FunctionMessageChunk:
-        return FunctionMessageChunk(content=content, name=_dict["name"])
+        return FunctionMessageChunk(content=content, name=_dict.name)
     elif role or default_class == ChatMessageChunk:
         return ChatMessageChunk(content=content, role=role)
     else:
         return default_class(content=content)
+
+
+def convert_dict_to_message(_dict: Mapping[str, Any]) -> BaseMessage:
+    role = _dict.role
+    content = _dict.content or ""
+    if role == "user":
+        return HumanMessage(content=content)
+    elif role == "assistant":
+        content = _dict.content
+        additional_kwargs = {}
+        return AIMessage(content=content, additional_kwargs=additional_kwargs)
+    elif role == "system":
+        return SystemMessage(content=content)
+    elif role == "function":
+        return FunctionMessage(content=content, name=_dict.name)
+    else:
+        return ChatMessage(content=content, role=role)
 
 
 class ChatFireworks(BaseChatModel):
@@ -52,9 +72,16 @@ class ChatFireworks(BaseChatModel):
 
     model = "accounts/fireworks/models/llama-v2-7b-chat"
     model_kwargs: Optional[dict] = {"temperature": 0.7, "max_tokens": 512, "top_p": 1}
-    fireworks_api_base: Optional[str] = "https://api.fireworks.ai/inference/v1"
     fireworks_api_key: Optional[str] = None
     max_retries: int = 20
+
+    @root_validator()
+    def validate_environment(cls, values: Dict) -> Dict:
+        """Validate that api key and python package exists in environment."""
+        values["fireworks_api_key"] = get_from_dict_or_env(
+            values, "fireworks_api_key", "FIREWORKS_API_KEY"
+        )
+        return values
 
     @property
     def _llm_type(self) -> str:
@@ -75,7 +102,7 @@ class ChatFireworks(BaseChatModel):
             "messages": message_dicts,
             **self.model_kwargs,
         }
-        response = self.completion_with_retry(**params)
+        response = completion_with_retry(self, **params)
         return self._create_chat_result(response)
 
     async def _agenerate(
@@ -86,13 +113,12 @@ class ChatFireworks(BaseChatModel):
         **kwargs: Any,
     ) -> ChatResult:
         message_dicts = self._create_message_dicts(messages, stop)
-        response = await openai.ChatCompletion.acreate(
-            api_base=self.fireworks_api_base,
-            api_key=os.environ.get("FIREWORKS_API_KEY"),
-            model=self.model,
-            messages=message_dicts,
+        params = {
+            "model": self.model,
+            "messages": message_dicts,
             **self.model_kwargs,
-        )
+        }
+        response = completion_with_retry(self, **params)
         return self._create_chat_result(response)
 
     def _combine_llm_outputs(self, llm_outputs: List[Optional[dict]]) -> dict:
@@ -100,11 +126,11 @@ class ChatFireworks(BaseChatModel):
 
     def _create_chat_result(self, response: Mapping[str, Any]) -> ChatResult:
         generations = []
-        for res in response["choices"]:
-            message = convert_dict_to_message(res["message"])
+        for res in response.choices:
+            message = convert_dict_to_message(res.message)
             gen = ChatGeneration(
                 message=message,
-                generation_info=dict(finish_reason=res.get("finish_reason")),
+                generation_info=dict(finish_reason=res.finish_reason),
             )
             generations.append(gen)
         llm_output = {"model": self.model}
@@ -131,30 +157,61 @@ class ChatFireworks(BaseChatModel):
             "stream": True,
             **self.model_kwargs,
         }
-        for chunk in self.completion_with_retry(**params):
-            choice = chunk["choices"][0]
-            chunk = _convert_delta_to_message_chunk(
-                choice["delta"], default_chunk_class
-            )
-            finish_reason = choice.get("finish_reason")
+        for chunk in completion_with_retry(self, **params):
+            choice = chunk.choices[0]
+            chunk = _convert_delta_to_message_chunk(choice.delta, default_chunk_class)
+            finish_reason = choice.finish_reason
             generation_info = (
                 dict(finish_reason=finish_reason) if finish_reason is not None else None
             )
             default_chunk_class = chunk.__class__
             yield ChatGenerationChunk(message=chunk, generation_info=generation_info)
 
-    def completion_with_retry(
-        self, run_manager: Optional[CallbackManagerForLLMRun] = None, **kwargs: Any
-    ) -> Any:
-        """Use tenacity to retry the completion call."""
-        retry_decorator = _create_retry_decorator(self, run_manager=run_manager)
 
-        @retry_decorator
-        def _completion_with_retry(**kwargs: Any) -> Any:
-            return openai.ChatCompletion.create(
-                api_base="https://api.fireworks.ai/inference/v1",
-                api_key=os.environ.get("FIREWORKS_API_KEY"),
-                **kwargs,
-            )
+def completion_with_retry(
+    llm: ChatFireworks,
+    run_manager: Optional[CallbackManagerForLLMRun] = None,
+    **kwargs: Any,
+) -> Any:
+    """Use tenacity to retry the completion call."""
+    retry_decorator = _create_retry_decorator(llm, run_manager=run_manager)
 
-        return _completion_with_retry(**kwargs)
+    @retry_decorator
+    def _completion_with_retry(**kwargs: Any) -> Any:
+        return fireworks.client.ChatCompletion.create(
+            **kwargs,
+        )
+
+    return _completion_with_retry(**kwargs)
+
+
+async def acompletion_with_retry(
+    llm: ChatFireworks,
+    run_manager: Optional[AsyncCallbackManagerForLLMRun] = None,
+    **kwargs: Any,
+) -> Any:
+    """Use tenacity to retry the async completion call."""
+    retry_decorator = _create_retry_decorator(llm, run_manager=run_manager)
+
+    @retry_decorator
+    async def _completion_with_retry(**kwargs: Any) -> Any:
+        return fireworks.client.ChatCompletion.acreate(
+            **kwargs,
+        )
+
+    return await _completion_with_retry(**kwargs)
+
+
+def _create_retry_decorator(
+    llm: ChatFireworks,
+    run_manager: Optional[
+        Union[AsyncCallbackManagerForLLMRun, CallbackManagerForLLMRun]
+    ] = None,
+) -> Callable[[Any], Any]:
+    errors = [
+        fireworks.client.error.RateLimitError,
+        fireworks.client.error.ServiceUnavailableError,
+    ]
+    return create_base_retry_decorator(
+        error_types=errors, max_retries=llm.max_retries, run_manager=run_manager
+    )
