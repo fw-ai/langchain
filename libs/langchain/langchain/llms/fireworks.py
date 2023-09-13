@@ -1,3 +1,4 @@
+import fireworks
 import fireworks.client
 from typing import Any, Callable, Dict, Iterator, List, Optional, Union
 from langchain.callbacks.manager import (
@@ -36,9 +37,10 @@ class Fireworks(LLM):
     @root_validator()
     def validate_environment(cls, values: Dict) -> Dict:
         """Validate that api key and python package exists in environment."""
-        values["fireworks_api_key"] = get_from_dict_or_env(
+        fireworks_api_key = get_from_dict_or_env(
             values, "fireworks_api_key", "FIREWORKS_API_KEY"
         )
+        fireworks.api_key = fireworks_api_key
         return values
 
     @property
