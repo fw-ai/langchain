@@ -40,7 +40,7 @@ class Fireworks(LLM):
         fireworks_api_key = get_from_dict_or_env(
             values, "fireworks_api_key", "FIREWORKS_API_KEY"
         )
-        fireworks.api_key = fireworks_api_key
+        fireworks.client.api_key = fireworks_api_key
         return values
 
     @property
