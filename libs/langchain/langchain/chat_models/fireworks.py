@@ -33,6 +33,7 @@ from langchain.schema.output import ChatGeneration, ChatGenerationChunk, ChatRes
 def _convert_delta_to_message_chunk(
     _dict: Mapping[str, Any], default_class: type[BaseMessageChunk]
 ) -> BaseMessageChunk:
+    """Convert a delta response to a message chunk."""
     role = _dict.role
     content = _dict.content or ""
     additional_kwargs = {}
@@ -52,6 +53,7 @@ def _convert_delta_to_message_chunk(
 
 
 def convert_dict_to_message(_dict: Mapping[str, Any]) -> BaseMessage:
+    """Convert a dict response to a message."""
     role = _dict.role
     content = _dict.content or ""
     if role == "user":
@@ -78,7 +80,7 @@ class ChatFireworks(BaseChatModel):
 
     @root_validator()
     def validate_environment(cls, values: Dict) -> Dict:
-        """Validate that api key and python package exists in environment."""
+        """Validate that api key in environment."""
         fireworks_api_key = get_from_dict_or_env(
             values, "fireworks_api_key", "FIREWORKS_API_KEY"
         )
@@ -234,7 +236,7 @@ async def acompletion_with_retry_streaming(
     run_manager: Optional[AsyncCallbackManagerForLLMRun] = None,
     **kwargs: Any,
 ) -> Any:
-    """Use tenacity to retry the async completion call."""
+    """Use tenacity to retry the completion call for streaming."""
     retry_decorator = _create_retry_decorator(llm, run_manager=run_manager)
 
     @retry_decorator
@@ -252,6 +254,7 @@ def _create_retry_decorator(
         Union[AsyncCallbackManagerForLLMRun, CallbackManagerForLLMRun]
     ] = None,
 ) -> Callable[[Any], Any]:
+    """Define retry mechanism."""
     errors = [
         fireworks.client.error.RateLimitError,
         fireworks.client.error.ServiceUnavailableError,

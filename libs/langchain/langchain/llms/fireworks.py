@@ -36,7 +36,7 @@ class Fireworks(LLM):
 
     @root_validator()
     def validate_environment(cls, values: Dict) -> Dict:
-        """Validate that api key and python package exists in environment."""
+        """Validate that api key in environment."""
         fireworks_api_key = get_from_dict_or_env(
             values, "fireworks_api_key", "FIREWORKS_API_KEY"
         )
@@ -55,6 +55,7 @@ class Fireworks(LLM):
         run_manager: Optional[CallbackManagerForLLMRun] = None,
         **kwargs: Any,
     ) -> str:
+        """Run the LLM on the given prompt and input."""
         params = {
             "model": self.model,
             "prompt": prompt,
@@ -71,6 +72,7 @@ class Fireworks(LLM):
         run_manager: Optional[CallbackManagerForLLMRun] = None,
         **kwargs: Any,
     ) -> str:
+        """Run the LLM on the given prompt and input."""
         params = {
             "model": self.model,
             "prompt": prompt,
@@ -190,7 +192,7 @@ async def acompletion_with_retry_streaming(
     run_manager: Optional[CallbackManagerForLLMRun] = None,
     **kwargs: Any,
 ) -> Any:
-    """Use tenacity to retry the completion call."""
+    """Use tenacity to retry the completion call for streaming."""
     retry_decorator = _create_retry_decorator(llm, run_manager=run_manager)
 
     @retry_decorator
@@ -208,6 +210,7 @@ def _create_retry_decorator(
         Union[AsyncCallbackManagerForLLMRun, CallbackManagerForLLMRun]
     ] = None,
 ) -> Callable[[Any], Any]:
+    """Define retry mechanism."""
     errors = [
         fireworks.client.error.RateLimitError,
         fireworks.client.error.ServiceUnavailableError,
