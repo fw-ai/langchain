@@ -29,7 +29,7 @@ def _stream_response_to_generation_chunk(
 class Fireworks(LLM):
     """Fireworks models."""
 
-    model = "accounts/fireworks/models/llama-v2-7b-chat"
+    model: str = "accounts/fireworks/models/llama-v2-7b-chat"
     model_kwargs: Optional[dict] = {"temperature": 0.7, "max_tokens": 512, "top_p": 1}
     fireworks_api_key: Optional[str] = None
     max_retries: int = 20
