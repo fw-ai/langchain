@@ -1,3 +1,4 @@
+import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from typing import (
     Any,
@@ -151,7 +152,7 @@ class Fireworks(LLM):
             response = await acompletion_with_retry_batching(
                 self, prompt=_prompts, **params
             )
-            choices.extend(response["choices"])
+            choices.extend(response)
 
         return self.create_llm_result(choices, prompts)
 
@@ -180,7 +181,7 @@ class Fireworks(LLM):
             generations.append(
                 [
                     Generation(
-                        text=choice["choices"][0].text,
+                        text=choice.__dict__["choices"][0].text,
                     )
                     for choice in sub_choices
                 ]
@@ -319,10 +320,10 @@ def completion_with_retry_batching(
 
     @retry_decorator
     def _completion_with_retry(prompt) -> Any:
-        return fireworks.client.Completion.create(**kwargs, prompt=prompt).__dict__
+        return fireworks.client.Completion.create(**kwargs, prompt=prompt)
 
     def batch_sync_run():
-        with ThreadPoolExecutor(max_workers=5) as executor:
+        with ThreadPoolExecutor() as executor:
             results = list(executor.map(_completion_with_retry, prompt))
         return results
 
@@ -345,11 +346,25 @@ async def acompletion_with_retry_batching(
 
     @retry_decorator
     async def _completion_with_retry(prompt) -> Any:
-        return fireworks.client.Completion.create(**kwargs, prompt=prompt).__dict__
+        return await fireworks.client.Completion.acreate(**kwargs, prompt=prompt)
+
+    def run_coroutine_in_new_loop(coroutine_func, *args, **kwargs):
+        new_loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(new_loop)
+            return new_loop.run_until_complete(coroutine_func(*args, **kwargs))
+        finally:
+            new_loop.close()
 
     async def batch_sync_run():
-        with ThreadPoolExecutor(max_workers=5) as executor:
-            results = list(executor.map(_completion_with_retry, prompt))
+        with ThreadPoolExecutor() as executor:
+            results = list(
+                executor.map(
+                    run_coroutine_in_new_loop,
+                    [_completion_with_retry] * len(prompt),
+                    prompt,
+                )
+            )
         return results
 
     return await batch_sync_run()
