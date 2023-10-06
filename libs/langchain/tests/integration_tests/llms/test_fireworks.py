@@ -86,3 +86,24 @@ async def test_fireworks_multiple_prompts_async_agenerate() -> None:
     assert isinstance(output, LLMResult)
     assert isinstance(output.generations, list)
     assert len(output.generations) == 2
+
+
+def test_fireworks_batch() -> None:
+    """Test streaming tokens from Fireworks."""
+    llm = Fireworks()
+
+    result = llm.batch(["How is the weather in New York today?", "I'm pickle rick"])
+    for token in result:
+        assert isinstance(token, str)
+
+
+@pytest.mark.asyncio
+async def test_fireworks_abatch() -> None:
+    """Test streaming tokens from Fireworks."""
+    llm = Fireworks()
+
+    result = await llm.abatch(
+        ["How is the weather in New York today?", "I'm not Pickle Rick"]
+    )
+    for token in result:
+        assert isinstance(token, str)
