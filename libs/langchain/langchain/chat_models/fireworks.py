@@ -100,6 +100,7 @@ class ChatFireworks(BaseChatModel):
     )
     fireworks_api_key: Optional[str] = None
     max_retries: int = 20
+    batch_size: int = 20
 
     @root_validator()
     def validate_environment(cls, values: Dict) -> Dict:
@@ -151,13 +152,22 @@ class ChatFireworks(BaseChatModel):
             name=run_name,
         )
 
-        args_list = [
-            (m, stop, run_managers[i] if run_managers else None, kwargs)
-            for i, m in enumerate(messages)
-        ]
-        with ThreadPoolExecutor() as executor:
-            # Use the executor to process the messages concurrently
-            results = list(executor.map(self.process_message, args_list))
+        def _completion_with_retry_batching(message):
+            args_list = [
+                (m, stop, run_managers[i] if run_managers else None, kwargs)
+                for i, m in enumerate(message)
+            ]
+            with ThreadPoolExecutor() as executor:
+                # Use the executor to process the messages concurrently
+                results = list(executor.map(self._process_message, args_list))
+
+            return results
+
+        sub_messages = self.get_batch_messages(params, messages, stop)
+
+        results = []
+        for message in sub_messages:
+            results.extend(_completion_with_retry_batching(message))
 
         flattened_outputs = [
             LLMResult(generations=[res.generations], llm_output=res.llm_output)
@@ -207,20 +217,29 @@ class ChatFireworks(BaseChatModel):
             name=run_name,
         )
 
-        args_list = [
-            (m, stop, run_managers[i] if run_managers else None, kwargs)
-            for i, m in enumerate(messages)
-        ]
-        loop = asyncio.get_event_loop()
-        with ThreadPoolExecutor(max_workers=4) as executor:
-            # Use asyncio.gather to concurrently execute the process_message function
-            results = await asyncio.gather(
-                *[
-                    loop.run_in_executor(executor, self.process_message, args)
-                    for args in args_list
-                ],
-                return_exceptions=True,
-            )
+        async def _acompletion_with_retry_batching(message):
+            args_list = [
+                (m, stop, run_managers[i] if run_managers else None, kwargs)
+                for i, m in enumerate(messages)
+            ]
+            loop = asyncio.get_event_loop()
+            with ThreadPoolExecutor() as executor:
+                # Use asyncio.gather to concurrently execute the process_message function
+                results = await asyncio.gather(
+                    *[
+                        loop.run_in_executor(executor, self._process_message, args)
+                        for args in args_list
+                    ],
+                    return_exceptions=True,
+                )
+
+            return results
+
+        sub_messages = self.get_batch_messages(params, messages, stop)
+
+        results = []
+        for message in sub_messages:
+            results.extend(await _acompletion_with_retry_batching(message))
 
         exceptions = []
         for i, res in enumerate(results):
@@ -263,7 +282,7 @@ class ChatFireworks(BaseChatModel):
             ]
         return output
 
-    def process_message(self, args):
+    def _process_message(self, args):
         m, stop, run_manager, kwargs = args
         try:
             return self._generate_with_cache(
@@ -273,6 +292,23 @@ class ChatFireworks(BaseChatModel):
             if run_manager:
                 run_manager.on_llm_error(e)
             raise e
+
+    def get_batch_messages(
+        self,
+        params: Dict[str, Any],
+        messages: List[List[BaseMessage]],
+        stop: Optional[List[str]] = None,
+    ) -> List[List[str]]:
+        """Get the sub messages for llm call."""
+        if stop is not None:
+            if "stop" in params:
+                raise ValueError("`stop` found in both the input and default params.")
+
+        sub_messages = [
+            messages[i : i + self.batch_size]
+            for i in range(0, len(messages), self.batch_size)
+        ]
+        return sub_messages
 
     def _generate(
         self,
