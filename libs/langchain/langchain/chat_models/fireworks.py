@@ -11,8 +11,9 @@ from typing import (
     Type,
     Union,
 )
-from langchain.load.dump import dumpd
+
 from langchain.adapters.openai import convert_message_to_dict
+from langchain.callbacks.base import Callbacks
 from langchain.callbacks.manager import (
     AsyncCallbackManager,
     AsyncCallbackManagerForLLMRun,
@@ -20,8 +21,8 @@ from langchain.callbacks.manager import (
     CallbackManagerForLLMRun,
 )
 from langchain.chat_models.base import BaseChatModel
-from langchain.callbacks.base import Callbacks
 from langchain.llms.base import create_base_retry_decorator
+from langchain.load.dump import dumpd
 from langchain.pydantic_v1 import Field, root_validator
 from langchain.schema.messages import (
     AIMessage,
@@ -158,7 +159,6 @@ class ChatFireworks(BaseChatModel):
                 for i, m in enumerate(message)
             ]
             with ThreadPoolExecutor() as executor:
-                # Use the executor to process the messages concurrently
                 results = list(executor.map(self._process_message, args_list))
 
             return results
@@ -224,7 +224,6 @@ class ChatFireworks(BaseChatModel):
             ]
             loop = asyncio.get_event_loop()
             with ThreadPoolExecutor() as executor:
-                # Use asyncio.gather to concurrently execute the process_message function
                 results = await asyncio.gather(
                     *[
                         loop.run_in_executor(executor, self._process_message, args)

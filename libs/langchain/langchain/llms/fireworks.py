@@ -8,7 +8,6 @@ from typing import (
     Iterator,
     List,
     Optional,
-    Set,
     Union,
 )
 
@@ -18,9 +17,7 @@ from langchain.callbacks.manager import (
 )
 from langchain.llms.base import LLM, create_base_retry_decorator
 from langchain.pydantic_v1 import Field, root_validator
-from langchain.schema.language_model import LanguageModelInput
 from langchain.schema.output import Generation, GenerationChunk, LLMResult
-from langchain.schema.runnable.config import RunnableConfig
 from langchain.utils.env import get_from_dict_or_env
 
 
@@ -226,42 +223,6 @@ class Fireworks(LLM):
         ):
             chunk = _stream_response_to_generation_chunk(stream_resp)
             yield chunk
-
-    def stream(
-        self,
-        input: LanguageModelInput,
-        config: Optional[RunnableConfig] = None,
-        *,
-        stop: Optional[List[str]] = None,
-        **kwargs: Any,
-    ) -> Iterator[str]:
-        prompt = self._convert_input(input).to_string()
-        generation: Optional[GenerationChunk] = None
-        for chunk in self._stream(prompt):
-            yield chunk.text
-            if generation is None:
-                generation = chunk
-            else:
-                generation += chunk
-        assert generation is not None
-
-    async def astream(
-        self,
-        input: LanguageModelInput,
-        config: Optional[RunnableConfig] = None,
-        *,
-        stop: Optional[List[str]] = None,
-        **kwargs: Any,
-    ) -> AsyncIterator[str]:
-        prompt = self._convert_input(input).to_string()
-        generation: Optional[GenerationChunk] = None
-        async for chunk in self._astream(prompt):
-            yield chunk.text
-            if generation is None:
-                generation = chunk
-            else:
-                generation += chunk
-        assert generation is not None
 
 
 def completion_with_retry(
