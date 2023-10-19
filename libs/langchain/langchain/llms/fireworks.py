@@ -1,3 +1,5 @@
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, AsyncIterator, Callable, Dict, Iterator, List, Optional, Union
 
 from langchain.callbacks.manager import (
@@ -6,7 +8,7 @@ from langchain.callbacks.manager import (
 )
 from langchain.llms.base import LLM, create_base_retry_decorator
 from langchain.pydantic_v1 import Field, root_validator
-from langchain.schema.output import GenerationChunk
+from langchain.schema.output import Generation, GenerationChunk, LLMResult
 from langchain.utils.env import get_from_dict_or_env
 
 
@@ -29,13 +31,14 @@ class Fireworks(LLM):
     model: str = "accounts/fireworks/models/llama-v2-7b-chat"
     model_kwargs: dict = Field(
         default_factory=lambda: {
-            "temperature": 0.7,
+            "temperature": 0.1,
             "max_tokens": 512,
-            "top_p": 1,
+            "top_p": 0.9,
         }.copy()
     )
     fireworks_api_key: Optional[str] = None
     max_retries: int = 20
+    batch_size: int = 20
 
     @root_validator()
     def validate_environment(cls, values: Dict) -> Dict:
@@ -95,6 +98,90 @@ class Fireworks(LLM):
         )
 
         return response.choices[0].text
+
+    def _generate(
+        self,
+        prompts: List[str],
+        stop: Optional[List[str]] = None,
+        run_manager: Optional[CallbackManagerForLLMRun] = None,
+        **kwargs: Any,
+    ) -> LLMResult:
+        """Call out to Fireworks endpoint with k unique prompts.
+        Args:
+            prompts: The prompts to pass into the model.
+            stop: Optional list of stop words to use when generating.
+        Returns:
+            The full LLM output.
+        """
+        params = {
+            "model": self.model,
+            **self.model_kwargs,
+        }
+        sub_prompts = self.get_batch_prompts(params, prompts, stop)
+        choices = []
+        for _prompts in sub_prompts:
+            response = completion_with_retry_batching(
+                self, prompt=_prompts, run_manager=run_manager, **params
+            )
+            choices.extend(response)
+
+        return self.create_llm_result(choices, prompts)
+
+    async def _agenerate(
+        self,
+        prompts: List[str],
+        stop: Optional[List[str]] = None,
+        run_manager: Optional[AsyncCallbackManagerForLLMRun] = None,
+        **kwargs: Any,
+    ) -> LLMResult:
+        """Call out to Fireworks endpoint async with k unique prompts."""
+        params = {
+            "model": self.model,
+            **self.model_kwargs,
+        }
+        sub_prompts = self.get_batch_prompts(params, prompts, stop)
+        choices = []
+        for _prompts in sub_prompts:
+            response = await acompletion_with_retry_batching(
+                self, prompt=_prompts, run_manager=run_manager, **params
+            )
+            choices.extend(response)
+
+        return self.create_llm_result(choices, prompts)
+
+    def get_batch_prompts(
+        self,
+        params: Dict[str, Any],
+        prompts: List[str],
+        stop: Optional[List[str]] = None,
+    ) -> List[List[str]]:
+        """Get the sub prompts for llm call."""
+        if stop is not None:
+            if "stop" in params:
+                raise ValueError("`stop` found in both the input and default params.")
+            params["stop"] = stop
+
+        sub_prompts = [
+            prompts[i : i + self.batch_size]
+            for i in range(0, len(prompts), self.batch_size)
+        ]
+        return sub_prompts
+
+    def create_llm_result(self, choices: Any, prompts: List[str]) -> LLMResult:
+        """Create the LLMResult from the choices and prompts."""
+        generations = []
+        for i, _ in enumerate(prompts):
+            sub_choices = choices[i : (i + 1)]
+            generations.append(
+                [
+                    Generation(
+                        text=choice.__dict__["choices"][0].text,
+                    )
+                    for choice in sub_choices
+                ]
+            )
+        llm_output = {"model": self.model}
+        return LLMResult(generations=generations, llm_output=llm_output)
 
     def _stream(
         self,
@@ -177,6 +264,75 @@ async def acompletion_with_retry(
         )
 
     return await _completion_with_retry(**kwargs)
+
+
+def completion_with_retry_batching(
+    llm: Fireworks,
+    *,
+    run_manager: Optional[CallbackManagerForLLMRun] = None,
+    **kwargs: Any,
+) -> Any:
+    """Use tenacity to retry the completion call."""
+    import fireworks.client
+
+    prompt = kwargs["prompt"]
+    del kwargs["prompt"]
+    print(prompt)
+    print(kwargs)
+
+    retry_decorator = _create_retry_decorator(llm, run_manager=run_manager)
+
+    @retry_decorator
+    def _completion_with_retry(prompt) -> Any:
+        print(prompt)
+        return fireworks.client.Completion.create(**kwargs, prompt=prompt)
+
+    def batch_sync_run():
+        with ThreadPoolExecutor() as executor:
+            results = list(executor.map(_completion_with_retry, prompt))
+        return results
+
+    return batch_sync_run()
+
+
+async def acompletion_with_retry_batching(
+    llm: Fireworks,
+    *,
+    run_manager: Optional[AsyncCallbackManagerForLLMRun] = None,
+    **kwargs: Any,
+) -> Any:
+    """Use tenacity to retry the completion call."""
+    import fireworks.client
+
+    prompt = kwargs["prompt"]
+    del kwargs["prompt"]
+
+    retry_decorator = _create_retry_decorator(llm, run_manager=run_manager)
+
+    @retry_decorator
+    async def _completion_with_retry(prompt) -> Any:
+        return await fireworks.client.Completion.acreate(**kwargs, prompt=prompt)
+
+    def run_coroutine_in_new_loop(coroutine_func, *args, **kwargs):
+        new_loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(new_loop)
+            return new_loop.run_until_complete(coroutine_func(*args, **kwargs))
+        finally:
+            new_loop.close()
+
+    async def batch_sync_run():
+        with ThreadPoolExecutor() as executor:
+            results = list(
+                executor.map(
+                    run_coroutine_in_new_loop,
+                    [_completion_with_retry] * len(prompt),
+                    prompt,
+                )
+            )
+        return results
+
+    return await batch_sync_run()
 
 
 async def acompletion_with_retry_streaming(
