@@ -6,7 +6,7 @@ from langchain.callbacks.manager import (
     AsyncCallbackManagerForLLMRun,
     CallbackManagerForLLMRun,
 )
-from langchain.llms.base import LLM, create_base_retry_decorator
+from langchain.llms.base import BaseLLM, create_base_retry_decorator
 from langchain.pydantic_v1 import Field, root_validator
 from langchain.schema.output import Generation, GenerationChunk, LLMResult
 from langchain.utils.env import get_from_dict_or_env
@@ -25,7 +25,7 @@ def _stream_response_to_generation_chunk(
     )
 
 
-class Fireworks(LLM):
+class Fireworks(BaseLLM):
     """Fireworks models."""
 
     model: str = "accounts/fireworks/models/llama-v2-7b-chat"
@@ -60,44 +60,6 @@ class Fireworks(LLM):
     def _llm_type(self) -> str:
         """Return type of llm."""
         return "fireworks"
-
-    def _call(
-        self,
-        prompt: str,
-        stop: Optional[List[str]] = None,
-        run_manager: Optional[CallbackManagerForLLMRun] = None,
-        **kwargs: Any,
-    ) -> str:
-        """Run the LLM on the given prompt and input."""
-        params: dict = {
-            "model": self.model,
-            "prompt": prompt,
-            **self.model_kwargs,
-        }
-        response = completion_with_retry(
-            self, run_manager=run_manager, stop=stop, **params
-        )
-
-        return response.choices[0].text
-
-    async def _acall(
-        self,
-        prompt: str,
-        stop: Optional[List[str]] = None,
-        run_manager: Optional[AsyncCallbackManagerForLLMRun] = None,
-        **kwargs: Any,
-    ) -> str:
-        """Run the LLM on the given prompt and input."""
-        params = {
-            "model": self.model,
-            "prompt": prompt,
-            **self.model_kwargs,
-        }
-        response = await acompletion_with_retry(
-            self, run_manager=run_manager, stop=stop, **params
-        )
-
-        return response.choices[0].text
 
     def _generate(
         self,
@@ -277,17 +239,14 @@ def completion_with_retry_batching(
 
     prompt = kwargs["prompt"]
     del kwargs["prompt"]
-    print(prompt)
-    print(kwargs)
 
     retry_decorator = _create_retry_decorator(llm, run_manager=run_manager)
 
     @retry_decorator
-    def _completion_with_retry(prompt) -> Any:
-        print(prompt)
+    def _completion_with_retry(prompt: str) -> Any:
         return fireworks.client.Completion.create(**kwargs, prompt=prompt)
 
-    def batch_sync_run():
+    def batch_sync_run() -> List:
         with ThreadPoolExecutor() as executor:
             results = list(executor.map(_completion_with_retry, prompt))
         return results
@@ -310,10 +269,12 @@ async def acompletion_with_retry_batching(
     retry_decorator = _create_retry_decorator(llm, run_manager=run_manager)
 
     @retry_decorator
-    async def _completion_with_retry(prompt) -> Any:
+    async def _completion_with_retry(prompt: str) -> Any:
         return await fireworks.client.Completion.acreate(**kwargs, prompt=prompt)
 
-    def run_coroutine_in_new_loop(coroutine_func, *args, **kwargs):
+    def run_coroutine_in_new_loop(
+        coroutine_func: Any, *args: Dict, **kwargs: Dict
+    ) -> Any:
         new_loop = asyncio.new_event_loop()
         try:
             asyncio.set_event_loop(new_loop)
@@ -321,7 +282,7 @@ async def acompletion_with_retry_batching(
         finally:
             new_loop.close()
 
-    async def batch_sync_run():
+    async def batch_sync_run() -> List:
         with ThreadPoolExecutor() as executor:
             results = list(
                 executor.map(
