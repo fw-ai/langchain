@@ -58,7 +58,7 @@ def _convert_delta_to_message_chunk(
     elif role or default_class == ChatMessageChunk:
         return ChatMessageChunk(content=content, role=role)
     else:
-        return default_class(type="", content=content)
+        return default_class(content=content)
 
 
 def convert_dict_to_message(_dict: Any) -> BaseMessage:
